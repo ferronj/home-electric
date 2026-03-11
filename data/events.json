@@ -1,0 +1,12 @@
+{
+  "events": [
+    {
+      "name": "heat_pump",
+      "label": "Heat Pump",
+      "date": "2024-11-06",
+      "equipment_cost": null,
+      "rebates": null,
+      "notes": "Heat pump installation"
+    }
+  ]
+}
