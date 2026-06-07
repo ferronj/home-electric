@@ -55,10 +55,9 @@ Streamlit app analyzing home electricity usage before/after heat pump and heat p
 ## Gotchas
 - ArviZ 1.0.0 removed InferenceData from top-level namespace — pin `arviz<1.0.0`
 - Plotly `add_vline` with `annotation_text` on `make_subplots` causes TypeError — use shapes instead
-- `uv.dev-dependencies` in pyproject.toml is deprecated — should migrate to `dependency-groups.dev`
 - Streamlit auto-detects `app/pages/` as multipage — disable with `showSidebarNavigation = false`
 - numpy bool (np.True_) is not Python bool — use `==` not `is` in assertions
-- The simple before/after savings comparison is misleading with limited post-install data during winter — use Bayesian model for temperature-normalized estimates
+- The simple before/after savings comparison is misleading with limited post-install data during winter — the dashboard now also surfaces a temperature-normalized number from the Full Temperature model when one has been run on the Bayesian Modeling tab
 
 ## Running
 ```bash

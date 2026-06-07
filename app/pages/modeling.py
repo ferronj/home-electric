@@ -7,7 +7,13 @@ import streamlit as st
 from src.models.simple_normal import SimpleNormalModel
 from src.models.piecewise_linear import PiecewiseLinearModel
 from src.models.full_model import FullTemperatureModel
-from src.models.diagnostics import generate_diagnostics_report
+from src.models.diagnostics import (
+    check_ess,
+    check_rhat,
+    count_divergences,
+    generate_diagnostics_report,
+    model_comparison,
+)
 from src.viz.model_plots import plot_trace, plot_posterior, plot_piecewise_fit
 
 
@@ -61,6 +67,8 @@ def render_modeling(app_state: dict):
                     result = _run_full_model(clean_df, setpoint, draws, chains)
 
                 st.session_state["model_result"] = result
+                runs = st.session_state.setdefault("model_runs", {})
+                runs[result["type"]] = result
                 st.success("Model sampling complete!")
             except Exception as e:
                 st.error(f"Model error: {e}")
@@ -70,6 +78,11 @@ def render_modeling(app_state: dict):
     if "model_result" in st.session_state:
         result = st.session_state["model_result"]
         _display_results(result, merged_df, config)
+
+    # Side-by-side LOO comparison once 2+ different models have been run
+    runs = st.session_state.get("model_runs", {})
+    if len(runs) >= 2:
+        _render_model_comparison(runs)
 
 
 def _run_simple_normal(df, draws, chains):
@@ -165,8 +178,26 @@ def _display_results(result, merged_df, config):
         st.success("Convergence: All diagnostics passed")
     else:
         st.warning("Convergence issues detected")
-        for w in report["warnings"]:
-            st.warning(w)
+
+    rhat_results = check_rhat(model.idata)
+    ess_results = check_ess(model.idata)
+    n_div = count_divergences(model.idata)
+
+    diag_rows = []
+    for param in rhat_results:
+        rhat = rhat_results[param]["rhat"]
+        ess = ess_results.get(param, {}).get("ess_bulk", float("nan"))
+        ok = rhat_results[param]["ok"] and ess_results.get(param, {}).get("ok", False)
+        diag_rows.append({
+            "param": param,
+            "rhat": round(rhat, 3),
+            "ess_bulk": round(ess, 0),
+            "ok": "✓" if ok else "✗",
+        })
+    diag_df = pd.DataFrame(diag_rows).set_index("param")
+    st.markdown(f"**Diagnostics** _(divergences: {n_div})_")
+    st.dataframe(diag_df, use_container_width=True)
+    if report["recommendations"]:
         for r in report["recommendations"]:
             st.info(r)
 
@@ -248,3 +279,19 @@ def _display_results(result, merged_df, config):
         for name, p in params.items():
             st.markdown(f"**{name}**: mean usage = {p['mu_mean']:.1f} kWh/day, "
                         f"std = {p['sigma_mean']:.1f} kWh")
+
+
+def _render_model_comparison(runs: dict):
+    """Render LOO model comparison once 2+ different models have run."""
+    st.divider()
+    st.subheader("Model Comparison (LOO)")
+    idatas = {name: run["model"].idata for name, run in runs.items()}
+    table = model_comparison(idatas)
+    if table is None:
+        st.info("LOO comparison unavailable for the current set of models.")
+        return
+    st.dataframe(table, use_container_width=True)
+    st.caption(
+        "Higher elpd_loo is better. `weight` is the LOO model-stacking weight; "
+        "`p_loo` is the effective number of parameters."
+    )
