@@ -1,24 +1,41 @@
 """Modeling tab: Bayesian model configuration, execution, and results."""
 
+import os
+
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-from src.models.simple_normal import SimpleNormalModel
-from src.models.piecewise_linear import PiecewiseLinearModel
-from src.models.full_model import FullTemperatureModel
-from src.models.diagnostics import (
-    check_ess,
-    check_rhat,
-    count_divergences,
-    generate_diagnostics_report,
-    model_comparison,
-)
-from src.viz.model_plots import plot_trace, plot_posterior, plot_piecewise_fit
+_DISABLED_ENV = os.getenv("STREAMLIT_DISABLE_MODELING", "").lower() in ("1", "true", "yes")
+_IMPORT_ERROR: Exception | None = None
+
+if _DISABLED_ENV:
+    MODELING_AVAILABLE = False
+else:
+    try:
+        from src.models.simple_normal import SimpleNormalModel
+        from src.models.piecewise_linear import PiecewiseLinearModel
+        from src.models.full_model import FullTemperatureModel
+        from src.models.diagnostics import (
+            check_ess,
+            check_rhat,
+            count_divergences,
+            generate_diagnostics_report,
+            model_comparison,
+        )
+        from src.viz.model_plots import plot_trace, plot_posterior, plot_piecewise_fit
+        MODELING_AVAILABLE = True
+    except Exception as e:  # pragma: no cover — exercised only when PyMC/ArviZ missing
+        _IMPORT_ERROR = e
+        MODELING_AVAILABLE = False
 
 
 def render_modeling(app_state: dict):
     """Render the Bayesian modeling tab."""
+    if not MODELING_AVAILABLE:
+        _render_disabled_banner()
+        return
+
     merged_df = app_state.get("merged_df")
     events = app_state.get("events", [])
     config = app_state.get("config")
@@ -70,6 +87,13 @@ def render_modeling(app_state: dict):
                 runs = st.session_state.setdefault("model_runs", {})
                 runs[result["type"]] = result
                 st.success("Model sampling complete!")
+            except MemoryError as e:
+                st.error(
+                    "Out of memory during sampling. The hosted environment likely "
+                    "doesn't have enough RAM for MCMC — try running locally."
+                )
+                st.caption(f"Details: {e}")
+                return
             except Exception as e:
                 st.error(f"Model error: {e}")
                 return
@@ -83,6 +107,27 @@ def render_modeling(app_state: dict):
     runs = st.session_state.get("model_runs", {})
     if len(runs) >= 2:
         _render_model_comparison(runs)
+
+
+def _render_disabled_banner():
+    """Show explanation banner when modeling isn't usable in this environment."""
+    st.subheader("Bayesian Modeling")
+    if _DISABLED_ENV:
+        st.info(
+            "Bayesian modeling is disabled in this deployment. MCMC sampling needs "
+            "more memory than the Streamlit Community Cloud free tier provides. "
+            "To fit models, run the app locally: `uv run streamlit run app/main.py`."
+        )
+    else:
+        st.warning(
+            "Bayesian modeling is unavailable in this environment — PyMC or ArviZ "
+            "failed to import. The Dashboard tab is fully functional. To run models, "
+            "install the optional dependencies locally: `uv sync` then "
+            "`uv run streamlit run app/main.py`."
+        )
+        if _IMPORT_ERROR is not None:
+            with st.expander("Import error details"):
+                st.code(f"{type(_IMPORT_ERROR).__name__}: {_IMPORT_ERROR}")
 
 
 def _run_simple_normal(df, draws, chains):

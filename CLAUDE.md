@@ -65,3 +65,11 @@ uv run streamlit run app/main.py
 uv run pytest
 uv run pytest tests/test_models.py  # slow: ~70s
 ```
+
+## Deployment (Streamlit Community Cloud)
+- Entry point: `app/main.py`
+- Python version: `.python-version` (3.12)
+- Dependencies: `requirements.txt` (mirrors `pyproject.toml` `[project.dependencies]` — keep in sync)
+- PyMC builds on Cloud free tier but MCMC sampling can OOM (~1GB limit). The dashboard, cost analysis, and degree-day blocks work fully without sampling; modeling tab degrades gracefully if PyMC is missing or sampling fails.
+- No persistent storage on Cloud: `data/raw/` is empty in the deployed app, so visitors must upload their own PGN CSVs via the sidebar widget (or we commit demo data under `data/demo/` and have the sidebar fall back to it).
+- `STREAMLIT_DISABLE_MODELING=1` env var forces the modeling tab into "disabled on Cloud" mode without needing PyMC to fail; set this in the Cloud app's secrets/env if you want to skip the sampling path entirely.

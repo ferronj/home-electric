@@ -1,7 +1,6 @@
 venv
 .venv
 archive
-.python-version
 __pycache__
 *.pyc
 .pytest_cache
@@ -10,3 +9,11 @@ dist
 build
 data/raw/
 data/processed/
+
+# Claude Code session artifacts
+.claude/worktrees/
+.claude/scheduled_tasks.lock
+
+# Sampling artifacts (keep .nc files in data/processed/ for pre-computed results)
+*.pkl
+
