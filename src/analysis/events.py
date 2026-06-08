@@ -9,6 +9,29 @@ from src.data.schemas import EquipmentEvent
 DEFAULT_EVENTS_PATH = Path("data/events.json")
 
 
+def _coerce_money(value) -> float | None:
+    """Permissive parse for cost/rebate JSON values.
+
+    Accepts numbers, numeric strings (with optional $ / commas / whitespace),
+    None, and empty strings. Returns None when the value is missing or unparseable.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        cleaned = value.strip().lstrip("$").replace(",", "")
+        if not cleaned:
+            return None
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+    return None
+
+
 def load_events(path: Path = DEFAULT_EVENTS_PATH) -> list[EquipmentEvent]:
     """Load events from JSON file. Returns empty list if file doesn't exist."""
     if not path.exists():
@@ -22,8 +45,8 @@ def load_events(path: Path = DEFAULT_EVENTS_PATH) -> list[EquipmentEvent]:
             name=e["name"],
             label=e["label"],
             date=date.fromisoformat(e["date"]),
-            equipment_cost=e.get("equipment_cost"),
-            rebates=e.get("rebates"),
+            equipment_cost=_coerce_money(e.get("equipment_cost")),
+            rebates=_coerce_money(e.get("rebates")),
             notes=e.get("notes"),
         )
         for e in data.get("events", [])
