@@ -8,9 +8,14 @@ from app.components.kpi_cards import render_kpi_row
 from src.analysis.cost import (
     compute_cumulative_savings,
     compute_roi_payback,
+    compute_savings_from_full_model_result,
     estimate_annual_savings,
 )
-from src.analysis.daily_usage import compute_period_statistics, compute_usage_change
+from src.analysis.daily_usage import (
+    compute_heating_cooling_degree_days,
+    compute_period_statistics,
+    compute_usage_change,
+)
 from src.viz.plots import (
     plot_cumulative_savings,
     plot_daily_usage_timeseries,
@@ -81,10 +86,51 @@ def render_dashboard(app_state: dict):
         fig_cost = plot_monthly_cost_comparison(display_df)
         st.plotly_chart(fig_cost, use_container_width=True)
 
+    # Degree-day efficiency comparison (kWh per HDD/CDD)
+    if (
+        "temp_f" in display_df.columns
+        and "period" in display_df.columns
+        and len(periods) >= 2
+    ):
+        dd_df = compute_heating_cooling_degree_days(display_df, base_temp_f=65.0)
+        rows = []
+        for p in periods:
+            sub = dd_df[dd_df["period"] == p]
+            total_hdd = sub["hdd"].sum()
+            total_cdd = sub["cdd"].sum()
+            total_kwh = sub["usage_kwh"].sum()
+            kwh_per_hdd = total_kwh / total_hdd if total_hdd > 0 else float("nan")
+            kwh_per_cdd = total_kwh / total_cdd if total_cdd > 0 else float("nan")
+            rows.append({
+                "Period": p,
+                "Days": len(sub),
+                "Total HDD": round(total_hdd, 0),
+                "Total CDD": round(total_cdd, 0),
+                "kWh / HDD": round(kwh_per_hdd, 2),
+                "kWh / CDD": round(kwh_per_cdd, 2),
+            })
+        dd_summary = pd.DataFrame(rows).set_index("Period")
+        st.markdown("**Degree-Day Efficiency** _(base 65°F)_")
+        st.dataframe(dd_summary, use_container_width=True)
+        st.caption(
+            "Lower kWh/HDD after install = more efficient heating. "
+            "kWh/CDD covers cooling-side efficiency (less meaningful when cooling load is small)."
+        )
+
     # Per-event savings and ROI
     if len(periods) >= 2 and change:
         rate = config.electricity_rate
         savings = estimate_annual_savings(stats[periods[0]], stats[periods[-1]], rate)
+
+        # If a Full Temperature model has been run this session, compute the
+        # temperature-normalized savings — this is the corrected headline number
+        # the project's CLAUDE.md flags the naive comparison as misleading for.
+        norm = None
+        if "temp_f" in display_df.columns:
+            model_result = st.session_state.get("model_result")
+            norm = compute_savings_from_full_model_result(
+                model_result, display_df, rate_per_kwh=rate
+            )
 
         col_sav, col_roi = st.columns(2)
 
@@ -101,13 +147,29 @@ def render_dashboard(app_state: dict):
                     "Use the Bayesian Modeling tab for temperature-normalized analysis."
                 )
 
+            if norm:
+                st.markdown("**Temperature-Normalized Annual Savings (Bayesian)**")
+                st.markdown(f"- Energy: **{norm['annual_kwh_saved']:.0f} kWh/year**")
+                st.markdown(f"- Cost: **${norm['annual_cost_saved']:.0f}/year**")
+                st.markdown(f"- Monthly: **${norm['annual_cost_saved'] / 12:.0f}/month**")
+                st.caption(
+                    f"From Full Temperature model posterior means "
+                    f"({norm['before_period']} → {norm['after_period']}), "
+                    f"applied to {norm['n_temp_days_used']} days of historical temps."
+                )
+
         with col_roi:
             # Find the most recent event with a cost
             cost_events = [e for e in events if e.equipment_cost and e.equipment_cost > 0]
             if cost_events:
                 latest = cost_events[-1]
-                roi = compute_roi_payback(latest.net_cost, savings["annual_cost_saved"])
-                st.markdown(f"**ROI for {latest.label}**")
+                # Prefer the temp-normalized number for ROI when it's available
+                annual_cost_for_roi = (
+                    norm["annual_cost_saved"] if norm else savings["annual_cost_saved"]
+                )
+                roi = compute_roi_payback(latest.net_cost, annual_cost_for_roi)
+                source = "Bayesian" if norm else "simple"
+                st.markdown(f"**ROI for {latest.label}** _({source} savings)_")
                 st.markdown(f"- Net equipment cost: **${latest.net_cost:,.0f}**")
                 if roi["simple_payback_years"] < 100:
                     st.markdown(

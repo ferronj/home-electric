@@ -7,9 +7,30 @@ from src.analysis.cost import (
     compute_electricity_rate,
     estimate_annual_savings,
     compute_roi_payback,
+    compute_savings_from_full_model_result,
     compute_temperature_normalized_savings,
     compute_cumulative_savings,
 )
+
+
+def _fake_full_model_result(before_k_heat: float, after_k_heat: float) -> dict:
+    return {
+        "type": "full_temperature",
+        "params": {
+            "setpoint": 60.0,
+            "baseload": {"mean": 14.3},
+            "periods": {
+                "Baseline": {
+                    "k_heat_mean": before_k_heat,
+                    "k_cool_mean": 0.61,
+                },
+                "After Heat Pump": {
+                    "k_heat_mean": after_k_heat,
+                    "k_cool_mean": 0.61,
+                },
+            },
+        },
+    }
 
 
 def test_compute_electricity_rate():
@@ -59,6 +80,78 @@ def test_compute_temperature_normalized_savings():
     # k_heat dropped from 2.25 to 0.71, so savings should be significant on cold days
     assert result["annual_kwh_saved"] > 0
     assert result["annual_cost_saved"] > 0
+
+
+def test_compute_savings_from_full_model_result_basic():
+    result = _fake_full_model_result(before_k_heat=2.25, after_k_heat=0.71)
+    daily_df = pd.DataFrame({
+        "temp_f": [45.0] * 180 + [75.0] * 185,
+    })
+
+    out = compute_savings_from_full_model_result(
+        result, daily_df, rate_per_kwh=0.154, setpoint=60.0
+    )
+
+    assert out is not None
+    assert out["annual_kwh_saved"] > 0
+    assert out["annual_cost_saved"] > 0
+    assert out["before_period"] == "Baseline"
+    assert out["after_period"] == "After Heat Pump"
+    assert out["n_temp_days_used"] == 365
+
+
+def test_compute_savings_from_full_model_result_returns_none_for_wrong_type():
+    daily_df = pd.DataFrame({"temp_f": [45.0, 75.0]})
+
+    assert compute_savings_from_full_model_result(
+        {"type": "simple_normal", "params": {}}, daily_df, rate_per_kwh=0.154
+    ) is None
+    assert compute_savings_from_full_model_result(
+        {}, daily_df, rate_per_kwh=0.154
+    ) is None
+    assert compute_savings_from_full_model_result(
+        None, daily_df, rate_per_kwh=0.154
+    ) is None
+
+
+def test_compute_savings_from_full_model_result_handles_single_period():
+    result = {
+        "type": "full_temperature",
+        "params": {
+            "baseload": {"mean": 14.3},
+            "periods": {
+                "Baseline": {"k_heat_mean": 2.25, "k_cool_mean": 0.61},
+            },
+        },
+    }
+    daily_df = pd.DataFrame({"temp_f": [45.0, 75.0]})
+
+    assert compute_savings_from_full_model_result(
+        result, daily_df, rate_per_kwh=0.154
+    ) is None
+
+
+def test_compute_savings_from_full_model_result_scales_short_series():
+    result = _fake_full_model_result(before_k_heat=2.25, after_k_heat=0.71)
+    short_df = pd.DataFrame({"temp_f": [45.0] * 30})
+
+    out = compute_savings_from_full_model_result(
+        result, short_df, rate_per_kwh=0.154, setpoint=60.0
+    )
+
+    assert out is not None
+    assert out["n_temp_days_used"] == 30
+    # 30 cold days scaled to 365 should still produce a sensible positive number
+    assert out["annual_kwh_saved"] > 0
+
+
+def test_compute_savings_from_full_model_result_missing_temp_column():
+    result = _fake_full_model_result(before_k_heat=2.25, after_k_heat=0.71)
+    no_temp_df = pd.DataFrame({"usage_kwh": [10.0, 20.0]})
+
+    assert compute_savings_from_full_model_result(
+        result, no_temp_df, rate_per_kwh=0.154
+    ) is None
 
 
 def test_compute_cumulative_savings():

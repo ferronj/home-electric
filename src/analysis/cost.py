@@ -96,6 +96,85 @@ def compute_temperature_normalized_savings(
     }
 
 
+def compute_savings_from_full_model_result(
+    model_result: dict,
+    daily_df: pd.DataFrame,
+    rate_per_kwh: float,
+    setpoint: float = 60.0,
+) -> dict | None:
+    """
+    Translate a Full Temperature model result into temperature-normalized savings.
+
+    Returns None when the result isn't a full_temperature run, has fewer than two
+    periods, or the dataframe lacks usable temp_f data. First period is treated as
+    "before", last as "after".
+    """
+    if not model_result or model_result.get("type") != "full_temperature":
+        return None
+
+    params = model_result.get("params") or {}
+    periods = params.get("periods") or {}
+    if len(periods) < 2:
+        return None
+
+    if "temp_f" not in daily_df.columns:
+        return None
+    temps = daily_df["temp_f"].dropna()
+    if temps.empty:
+        return None
+
+    period_names = list(periods.keys())
+    before_name, after_name = period_names[0], period_names[-1]
+    baseload_mean = float(params.get("baseload", {}).get("mean", 0.0))
+
+    before_params = {
+        "k_heat": float(periods[before_name]["k_heat_mean"]),
+        "k_cool": float(periods[before_name]["k_cool_mean"]),
+        "baseload": baseload_mean,
+    }
+    after_params = {
+        "k_heat": float(periods[after_name]["k_heat_mean"]),
+        "k_cool": float(periods[after_name]["k_cool_mean"]),
+        "baseload": baseload_mean,
+    }
+
+    typical_year_days = 365
+    if len(temps) >= typical_year_days:
+        typical_temps = temps.iloc[-typical_year_days:].reset_index(drop=True)
+    else:
+        scale = typical_year_days / len(temps)
+        typical_temps = temps.reset_index(drop=True)
+        result = compute_temperature_normalized_savings(
+            before_params,
+            after_params,
+            typical_temps,
+            setpoint=setpoint,
+            rate_per_kwh=rate_per_kwh,
+        )
+        return {
+            "annual_kwh_saved": result["annual_kwh_saved"] * scale,
+            "annual_cost_saved": result["annual_cost_saved"] * scale,
+            "before_period": before_name,
+            "after_period": after_name,
+            "n_temp_days_used": len(temps),
+        }
+
+    result = compute_temperature_normalized_savings(
+        before_params,
+        after_params,
+        typical_temps,
+        setpoint=setpoint,
+        rate_per_kwh=rate_per_kwh,
+    )
+    return {
+        "annual_kwh_saved": result["annual_kwh_saved"],
+        "annual_cost_saved": result["annual_cost_saved"],
+        "before_period": before_name,
+        "after_period": after_name,
+        "n_temp_days_used": len(temps),
+    }
+
+
 def compute_cumulative_savings(
     df: pd.DataFrame,
     event_date: pd.Timestamp,

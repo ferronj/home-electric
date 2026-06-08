@@ -55,10 +55,9 @@ Streamlit app analyzing home electricity usage before/after heat pump and heat p
 ## Gotchas
 - ArviZ 1.0.0 removed InferenceData from top-level namespace — pin `arviz<1.0.0`
 - Plotly `add_vline` with `annotation_text` on `make_subplots` causes TypeError — use shapes instead
-- `uv.dev-dependencies` in pyproject.toml is deprecated — should migrate to `dependency-groups.dev`
 - Streamlit auto-detects `app/pages/` as multipage — disable with `showSidebarNavigation = false`
 - numpy bool (np.True_) is not Python bool — use `==` not `is` in assertions
-- The simple before/after savings comparison is misleading with limited post-install data during winter — use Bayesian model for temperature-normalized estimates
+- The simple before/after savings comparison is misleading with limited post-install data during winter — the dashboard now also surfaces a temperature-normalized number from the Full Temperature model when one has been run on the Bayesian Modeling tab
 
 ## Running
 ```bash
@@ -66,3 +65,11 @@ uv run streamlit run app/main.py
 uv run pytest
 uv run pytest tests/test_models.py  # slow: ~70s
 ```
+
+## Deployment (Streamlit Community Cloud)
+- Entry point: `app/main.py`
+- Python version: `.python-version` (3.12)
+- Dependencies: `requirements.txt` (mirrors `pyproject.toml` `[project.dependencies]` — keep in sync)
+- PyMC builds on Cloud free tier but MCMC sampling can OOM (~1GB limit). The dashboard, cost analysis, and degree-day blocks work fully without sampling; modeling tab degrades gracefully if PyMC is missing or sampling fails.
+- No persistent storage on Cloud: `data/raw/` is empty in the deployed app, so visitors must upload their own PGN CSVs via the sidebar widget (or we commit demo data under `data/demo/` and have the sidebar fall back to it).
+- `STREAMLIT_DISABLE_MODELING=1` env var forces the modeling tab into "disabled on Cloud" mode without needing PyMC to fail; set this in the Cloud app's secrets/env if you want to skip the sampling path entirely.
