@@ -175,6 +175,132 @@ def compute_savings_from_full_model_result(
     }
 
 
+def compute_savings_credible_interval(
+    model_result: dict,
+    daily_df: pd.DataFrame,
+    rate_per_kwh: float,
+    setpoint: float = 60.0,
+    n_samples: int = 1000,
+    hdi_prob: float = 0.94,
+    equipment_cost: float | None = None,
+    seed: int | None = 0,
+) -> dict | None:
+    """
+    Propagate posterior uncertainty from a Full Temperature model fit into the
+    annual savings (and payback) distribution.
+
+    Returns a dict with mean / hdi_low / hdi_high for annual_kwh_saved,
+    annual_cost_saved, and (if equipment_cost given) simple_payback_years.
+    Returns None when the result isn't a usable full_temperature run or when
+    the underlying idata isn't available.
+    """
+    if not model_result or model_result.get("type") != "full_temperature":
+        return None
+
+    model = model_result.get("model")
+    idata = getattr(model, "idata", None) if model is not None else None
+    if idata is None or not hasattr(idata, "posterior"):
+        return None
+
+    params = model_result.get("params") or {}
+    periods = list((params.get("periods") or {}).keys())
+    if len(periods) < 2:
+        return None
+
+    if "temp_f" not in daily_df.columns:
+        return None
+    temps = daily_df["temp_f"].dropna().to_numpy(dtype=float)
+    if temps.size == 0:
+        return None
+
+    typical_year_days = 365
+    if temps.size >= typical_year_days:
+        typical_temps = temps[-typical_year_days:]
+        scale = 1.0
+    else:
+        typical_temps = temps
+        scale = typical_year_days / temps.size
+
+    try:
+        import arviz as az  # local import: cost.py is imported on PyMC-less deploys
+    except ImportError:
+        return None
+
+    posterior = idata.posterior
+    stacked = posterior.stack(sample=("chain", "draw"))
+    total_samples = stacked.sizes["sample"]
+    if total_samples == 0:
+        return None
+
+    rng = np.random.default_rng(seed)
+    n_draws = min(int(n_samples), total_samples)
+    idx = rng.choice(total_samples, size=n_draws, replace=False)
+
+    before_i = 0
+    after_i = len(periods) - 1
+
+    usage_min = stacked["usage_min"].values[idx]
+    k_heat = stacked["k_heat"].values  # shape: (n_periods, 1, total_samples)
+    k_cool = stacked["k_cool"].values
+    k_heat_before = k_heat[before_i, 0, idx]
+    k_heat_after = k_heat[after_i, 0, idx]
+    k_cool_before = k_cool[before_i, 0, idx]
+    k_cool_after = k_cool[after_i, 0, idx]
+
+    # Vectorized piecewise usage over (n_draws, n_days).
+    temps_row = typical_temps[None, :]
+    heating_mask = temps_row < setpoint
+    heat_delta = np.where(heating_mask, setpoint - temps_row, 0.0)
+    cool_delta = np.where(heating_mask, 0.0, temps_row - setpoint)
+    baseload = usage_min[:, None]
+
+    before_usage = (
+        k_heat_before[:, None] * heat_delta
+        + k_cool_before[:, None] * cool_delta
+        + baseload
+    )
+    after_usage = (
+        k_heat_after[:, None] * heat_delta
+        + k_cool_after[:, None] * cool_delta
+        + baseload
+    )
+
+    annual_kwh_draws = (before_usage - after_usage).sum(axis=1) * scale
+    annual_cost_draws = annual_kwh_draws * rate_per_kwh
+
+    out = {
+        "annual_kwh_saved": _summarize(annual_kwh_draws, hdi_prob, az),
+        "annual_cost_saved": _summarize(annual_cost_draws, hdi_prob, az),
+        "before_period": periods[before_i],
+        "after_period": periods[after_i],
+        "n_temp_days_used": int(temps.size),
+        "n_samples_used": int(n_draws),
+        "hdi_prob": float(hdi_prob),
+    }
+
+    if equipment_cost is not None and equipment_cost > 0:
+        positive = annual_cost_draws > 0
+        if positive.any():
+            payback_draws = np.where(
+                positive, equipment_cost / np.where(positive, annual_cost_draws, 1.0),
+                float("inf"),
+            )
+            finite = payback_draws[np.isfinite(payback_draws)]
+            if finite.size:
+                out["simple_payback_years"] = _summarize(finite, hdi_prob, az)
+        out["prob_savings_positive"] = float(positive.mean())
+
+    return out
+
+
+def _summarize(draws: np.ndarray, hdi_prob: float, az) -> dict:
+    """Mean + HDI summary of a 1-D draws array."""
+    mean = float(np.mean(draws))
+    hdi = az.hdi(np.asarray(draws), hdi_prob=hdi_prob)
+    low, high = float(np.min(hdi)), float(np.max(hdi))
+    return {"mean": mean, "hdi_low": low, "hdi_high": high}
+
+
 def compute_cumulative_savings(
     df: pd.DataFrame,
     event_date: pd.Timestamp,

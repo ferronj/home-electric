@@ -2,11 +2,13 @@
 
 import pandas as pd
 import numpy as np
+import pytest
 
 from src.analysis.cost import (
     compute_electricity_rate,
     estimate_annual_savings,
     compute_roi_payback,
+    compute_savings_credible_interval,
     compute_savings_from_full_model_result,
     compute_temperature_normalized_savings,
     compute_cumulative_savings,
@@ -152,6 +154,175 @@ def test_compute_savings_from_full_model_result_missing_temp_column():
     assert compute_savings_from_full_model_result(
         result, no_temp_df, rate_per_kwh=0.154
     ) is None
+
+
+def _fake_idata_full_model(
+    before_k_heat_draws: np.ndarray,
+    after_k_heat_draws: np.ndarray,
+    k_cool_value: float = 0.61,
+    usage_min_value: float = 14.3,
+):
+    """Build a minimal arviz InferenceData mimicking FullTemperatureModel posterior.
+
+    Draws arrays should be 1-D; they get reshaped into (chain=1, draw=N).
+    k_heat / k_cool have shape (chain, draw, n_periods, 1).
+    """
+    az = pytest.importorskip("arviz")
+
+    n = before_k_heat_draws.size
+    assert after_k_heat_draws.size == n
+
+    k_heat = np.stack(
+        [before_k_heat_draws, after_k_heat_draws], axis=0
+    )  # (n_periods, n)
+    k_heat = k_heat.T[None, :, :, None]  # (1, n, 2, 1)
+    k_cool = np.full((1, n, 2, 1), k_cool_value)
+    usage_min = np.full((1, n), usage_min_value)
+
+    posterior = {
+        "usage_min": usage_min,
+        "k_heat": k_heat,
+        "k_cool": k_cool,
+    }
+    dims = {
+        "k_heat": ["k_heat_dim_0", "k_heat_dim_1"],
+        "k_cool": ["k_cool_dim_0", "k_cool_dim_1"],
+    }
+    return az.from_dict(posterior=posterior, dims=dims)
+
+
+class _FakeModel:
+    def __init__(self, idata):
+        self.idata = idata
+
+
+def _full_result_with_idata(idata, before_k_heat_mean, after_k_heat_mean):
+    result = _fake_full_model_result(
+        before_k_heat=before_k_heat_mean, after_k_heat=after_k_heat_mean
+    )
+    result["model"] = _FakeModel(idata)
+    return result
+
+
+def test_credible_interval_basic_full_year():
+    pytest.importorskip("arviz")
+    rng = np.random.default_rng(42)
+    before = rng.normal(2.25, 0.05, 500)
+    after = rng.normal(0.71, 0.05, 500)
+    idata = _fake_idata_full_model(before, after)
+    result = _full_result_with_idata(idata, before.mean(), after.mean())
+
+    daily_df = pd.DataFrame({"temp_f": [45.0] * 180 + [75.0] * 185})
+    out = compute_savings_credible_interval(
+        result, daily_df, rate_per_kwh=0.154, setpoint=60.0, n_samples=500
+    )
+
+    assert out is not None
+    kwh = out["annual_kwh_saved"]
+    assert kwh["hdi_low"] <= kwh["mean"] <= kwh["hdi_high"]
+    cost = out["annual_cost_saved"]
+    assert cost["hdi_low"] <= cost["mean"] <= cost["hdi_high"]
+    # Cost summary should equal the kWh summary scaled by the rate
+    assert abs(cost["mean"] - kwh["mean"] * 0.154) < 1e-6
+    assert out["before_period"] == "Baseline"
+    assert out["after_period"] == "After Heat Pump"
+    assert out["n_samples_used"] == 500
+
+
+def test_credible_interval_matches_point_estimate():
+    pytest.importorskip("arviz")
+    rng = np.random.default_rng(0)
+    before = rng.normal(2.25, 0.05, 800)
+    after = rng.normal(0.71, 0.05, 800)
+    idata = _fake_idata_full_model(before, after)
+    result = _full_result_with_idata(idata, before.mean(), after.mean())
+
+    daily_df = pd.DataFrame({"temp_f": [45.0] * 180 + [75.0] * 185})
+    point = compute_savings_from_full_model_result(
+        result, daily_df, rate_per_kwh=0.154, setpoint=60.0
+    )
+    bayes = compute_savings_credible_interval(
+        result, daily_df, rate_per_kwh=0.154, setpoint=60.0, n_samples=800
+    )
+
+    assert point is not None and bayes is not None
+    rel_err = abs(bayes["annual_kwh_saved"]["mean"] - point["annual_kwh_saved"]) / point[
+        "annual_kwh_saved"
+    ]
+    assert rel_err < 0.05
+
+
+def test_credible_interval_wider_posterior_yields_wider_hdi():
+    pytest.importorskip("arviz")
+    rng = np.random.default_rng(7)
+    n = 600
+    before = rng.normal(2.25, 0.05, n)
+    tight_after = rng.normal(0.71, 0.02, n)
+    wide_after = rng.normal(0.71, 0.40, n)
+
+    daily_df = pd.DataFrame({"temp_f": [45.0] * 180 + [75.0] * 185})
+
+    tight = compute_savings_credible_interval(
+        _full_result_with_idata(
+            _fake_idata_full_model(before, tight_after), before.mean(), tight_after.mean()
+        ),
+        daily_df,
+        rate_per_kwh=0.154,
+        n_samples=n,
+    )
+    wide = compute_savings_credible_interval(
+        _full_result_with_idata(
+            _fake_idata_full_model(before, wide_after), before.mean(), wide_after.mean()
+        ),
+        daily_df,
+        rate_per_kwh=0.154,
+        n_samples=n,
+    )
+
+    tight_width = tight["annual_kwh_saved"]["hdi_high"] - tight["annual_kwh_saved"]["hdi_low"]
+    wide_width = wide["annual_kwh_saved"]["hdi_high"] - wide["annual_kwh_saved"]["hdi_low"]
+    assert wide_width > tight_width * 2
+
+
+def test_credible_interval_payback_included_with_equipment_cost():
+    pytest.importorskip("arviz")
+    rng = np.random.default_rng(3)
+    before = rng.normal(2.25, 0.05, 400)
+    after = rng.normal(0.71, 0.05, 400)
+    idata = _fake_idata_full_model(before, after)
+    result = _full_result_with_idata(idata, before.mean(), after.mean())
+    daily_df = pd.DataFrame({"temp_f": [45.0] * 180 + [75.0] * 185})
+
+    out = compute_savings_credible_interval(
+        result,
+        daily_df,
+        rate_per_kwh=0.154,
+        n_samples=400,
+        equipment_cost=15000.0,
+    )
+
+    assert "simple_payback_years" in out
+    payback = out["simple_payback_years"]
+    assert payback["hdi_low"] <= payback["mean"] <= payback["hdi_high"]
+    assert out["prob_savings_positive"] == 1.0
+
+
+def test_credible_interval_returns_none_for_wrong_type():
+    daily_df = pd.DataFrame({"temp_f": [45.0, 75.0]})
+    assert compute_savings_credible_interval(
+        {"type": "simple_normal"}, daily_df, rate_per_kwh=0.154
+    ) is None
+    assert compute_savings_credible_interval(None, daily_df, rate_per_kwh=0.154) is None
+    assert compute_savings_credible_interval(
+        {"type": "full_temperature", "params": {"periods": {"Baseline": {}}}},
+        daily_df, rate_per_kwh=0.154,
+    ) is None
+
+
+def test_credible_interval_returns_none_without_idata():
+    daily_df = pd.DataFrame({"temp_f": [45.0, 75.0]})
+    no_model = _fake_full_model_result(before_k_heat=2.25, after_k_heat=0.71)
+    assert compute_savings_credible_interval(no_model, daily_df, rate_per_kwh=0.154) is None
 
 
 def test_compute_cumulative_savings():

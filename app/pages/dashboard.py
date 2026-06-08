@@ -8,6 +8,7 @@ from app.components.kpi_cards import render_kpi_row
 from src.analysis.cost import (
     compute_cumulative_savings,
     compute_roi_payback,
+    compute_savings_credible_interval,
     compute_savings_from_full_model_result,
     estimate_annual_savings,
 )
@@ -126,11 +127,25 @@ def render_dashboard(app_state: dict):
         # temperature-normalized savings — this is the corrected headline number
         # the project's CLAUDE.md flags the naive comparison as misleading for.
         norm = None
+        ci = None
+        latest_cost_event = next(
+            (e for e in reversed(events) if e.equipment_cost and e.equipment_cost > 0),
+            None,
+        )
         if "temp_f" in display_df.columns:
             model_result = st.session_state.get("model_result")
             norm = compute_savings_from_full_model_result(
                 model_result, display_df, rate_per_kwh=rate
             )
+            if norm:
+                ci = compute_savings_credible_interval(
+                    model_result,
+                    display_df,
+                    rate_per_kwh=rate,
+                    equipment_cost=(
+                        latest_cost_event.net_cost if latest_cost_event else None
+                    ),
+                )
 
         col_sav, col_roi = st.columns(2)
 
@@ -149,20 +164,38 @@ def render_dashboard(app_state: dict):
 
             if norm:
                 st.markdown("**Temperature-Normalized Annual Savings (Bayesian)**")
-                st.markdown(f"- Energy: **{norm['annual_kwh_saved']:.0f} kWh/year**")
-                st.markdown(f"- Cost: **${norm['annual_cost_saved']:.0f}/year**")
-                st.markdown(f"- Monthly: **${norm['annual_cost_saved'] / 12:.0f}/month**")
+                if ci:
+                    kwh = ci["annual_kwh_saved"]
+                    cost = ci["annual_cost_saved"]
+                    hdi_pct = int(round(ci["hdi_prob"] * 100))
+                    st.markdown(
+                        f"- Energy: **{kwh['mean']:.0f} kWh/year** "
+                        f"_({hdi_pct}% HDI: {kwh['hdi_low']:.0f} – {kwh['hdi_high']:.0f})_"
+                    )
+                    st.markdown(
+                        f"- Cost: **${cost['mean']:.0f}/year** "
+                        f"_({hdi_pct}% HDI: ${cost['hdi_low']:.0f} – ${cost['hdi_high']:.0f})_"
+                    )
+                    st.markdown(f"- Monthly: **${cost['mean'] / 12:.0f}/month**")
+                    prob_pos = ci.get("prob_savings_positive")
+                    if prob_pos is not None and prob_pos < 1.0:
+                        st.caption(
+                            f"Posterior probability that savings are positive: "
+                            f"{prob_pos * 100:.1f}%."
+                        )
+                else:
+                    st.markdown(f"- Energy: **{norm['annual_kwh_saved']:.0f} kWh/year**")
+                    st.markdown(f"- Cost: **${norm['annual_cost_saved']:.0f}/year**")
+                    st.markdown(f"- Monthly: **${norm['annual_cost_saved'] / 12:.0f}/month**")
                 st.caption(
-                    f"From Full Temperature model posterior means "
+                    f"From Full Temperature model posterior "
                     f"({norm['before_period']} → {norm['after_period']}), "
                     f"applied to {norm['n_temp_days_used']} days of historical temps."
                 )
 
         with col_roi:
-            # Find the most recent event with a cost
-            cost_events = [e for e in events if e.equipment_cost and e.equipment_cost > 0]
-            if cost_events:
-                latest = cost_events[-1]
+            latest = latest_cost_event
+            if latest:
                 # Prefer the temp-normalized number for ROI when it's available
                 annual_cost_for_roi = (
                     norm["annual_cost_saved"] if norm else savings["annual_cost_saved"]
@@ -172,9 +205,18 @@ def render_dashboard(app_state: dict):
                 st.markdown(f"**ROI for {latest.label}** _({source} savings)_")
                 st.markdown(f"- Net equipment cost: **${latest.net_cost:,.0f}**")
                 if roi["simple_payback_years"] < 100:
-                    st.markdown(
-                        f"- Payback period: **{roi['simple_payback_years']:.1f} years**"
-                    )
+                    payback_ci = ci.get("simple_payback_years") if ci else None
+                    if payback_ci:
+                        hdi_pct = int(round(ci["hdi_prob"] * 100))
+                        st.markdown(
+                            f"- Payback period: **{roi['simple_payback_years']:.1f} years** "
+                            f"_({hdi_pct}% HDI: "
+                            f"{payback_ci['hdi_low']:.1f} – {payback_ci['hdi_high']:.1f})_"
+                        )
+                    else:
+                        st.markdown(
+                            f"- Payback period: **{roi['simple_payback_years']:.1f} years**"
+                        )
                 else:
                     st.markdown("- Payback period: **N/A** (savings too low)")
                 st.markdown(f"- 10-year net savings: **${roi['total_savings_10yr']:,.0f}**")
