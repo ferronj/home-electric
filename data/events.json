@@ -4,7 +4,7 @@
       "name": "heat_pump",
       "label": "Heat Pump",
       "date": "2024-11-06",
-      "equipment_cost": 17000,
+      "equipment_cost": "17000",
       "rebates": null,
       "notes": "Heat pump installation"
     },
@@ -12,7 +12,7 @@
       "name": "water_heater",
       "label": "Water Heater",
       "date": "2025-08-28",
-      "equipment_cost": 4200,
+      "equipment_cost": "4200",
       "rebates": null,
       "notes": "Water heater installation"
     }
